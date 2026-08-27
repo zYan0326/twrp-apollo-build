@@ -123,11 +123,14 @@ jobs:
               twrp_apollo-bp2a-eng
           PRODUCTEOF
 
-          # Rename omni_apollo.mk to twrp_apollo.mk
+          # Rename omni_apollo.mk to twrp_apollo.mk and fix references
           if [ -f device/xiaomi/apollo/omni_apollo.mk ]; then
             cp device/xiaomi/apollo/omni_apollo.mk device/xiaomi/apollo/twrp_apollo.mk
           fi
-
+          # Replace vendor/omni/config/common.mk with TWRP AOSP equivalent
+          sed -i 's|vendor/omni/config/common.mk|$(SRC_TARGET_DIR)/product/full.mk|g' device/xiaomi/apollo/twrp_apollo.mk
+          # Also fix PRODUCT_NAME from omni_ to twrp_
+          sed -i 's|PRODUCT_NAME := omni_apollo|PRODUCT_NAME := twrp_apollo|g' device/xiaomi/apollo/twrp_apollo.mk
           # Patch BoardConfig.mk for Android 16 FBE decryption
           cat >> device/xiaomi/apollo/BoardConfig.mk << 'BCFGEOF'
 
