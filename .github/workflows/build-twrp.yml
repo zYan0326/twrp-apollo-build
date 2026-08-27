@@ -315,10 +315,31 @@ jobs:
           echo "TARGET_RELEASE=$TARGET_RELEASE"
           echo "Memory:"
           free -h
-          # pipefail: 让 mka 的真实退出码(0/非0)直接决定本 step 成败，不再被 tail 掩盖
+
+          # 编译改为后台运行 + 前台心跳输出：
+          # 1) 全量日志实时写入 /tmp/build_full.log；
+          # 2) 前台每 40 秒打印一次日志尾部并输出心跳，保持 runner 与宿主通信，
+          #    避免编译大输出被 tail 吞掉、宿主导致长时间静默失联被 SIGTERM；
+          # 3) 编译结束用哨兵文件准确退出循环，透传 mka 真实退出码。
           set -o pipefail
-          mka recoveryimage -j2 2>&1 | tee /tmp/build_full.log | tail -200
-          echo "=== Build step finished with exit code $? ==="
+          rm -f /tmp/build_done
+          (
+            mka recoveryimage -j1 2>&1 | tee /tmp/build_full.log
+            echo "ok" > /tmp/build_done
+          ) &
+          BUILD_JOB=$!
+          while [ ! -f /tmp/build_done ]; do
+            echo "---- progress @ $(date -u +%H:%M:%S) ----"
+            tail -30 /tmp/build_full.log 2>/dev/null
+            echo "[heartbeat] build still running ..."
+            sleep 40
+          done
+          wait $BUILD_JOB
+          BUILD_STATUS=$?
+          echo "=== Build step exited with status $BUILD_STATUS ==="
+          echo "=== last 80 lines of full build log ==="
+          tail -80 /tmp/build_full.log 2>/dev/null
+          exit $BUILD_STATUS
 
       - name: Check build output
         run: |
