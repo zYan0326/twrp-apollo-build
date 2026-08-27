@@ -158,8 +158,6 @@ jobs:
           cat >> device/xiaomi/apollo/twrp_apollo.mk << 'TWRPEOF'
 
           # === Android 16 TWRP additions ===
-          $(call inherit-product, device/qcom/twrp-common/twrp-common.mk)
-
           PRODUCT_PACKAGES += \
               qseecomd \
               prepdecrypt.sh \
