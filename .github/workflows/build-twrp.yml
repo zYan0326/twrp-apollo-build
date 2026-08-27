@@ -52,6 +52,14 @@ jobs:
 
       - name: Create swap space
         run: |
+          echo "Checking existing swap..."
+          sudo swapon --show
+          if sudo swapon --show | grep -q swapfile; then
+            echo "Deactivating existing swapfile..."
+            sudo swapoff /swapfile || true
+            sleep 2
+            sudo rm -f /swapfile || true
+          fi
           echo "Creating 8GB swap file..."
           sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
           sudo chmod 600 /swapfile
