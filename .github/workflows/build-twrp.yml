@@ -115,10 +115,12 @@ jobs:
         run: |
           cd ~/android/twrp
 
-          # Patch AndroidProducts.mk - use TARGET_PRODUCT env var instead of lunch
+          # Patch AndroidProducts.mk
           cat > device/xiaomi/apollo/AndroidProducts.mk << 'PRODUCTEOF'
           PRODUCT_MAKEFILES := \
               $(LOCAL_DIR)/twrp_apollo.mk
+          COMMON_LUNCH_CHOICES := \
+              twrp_apollo-bp2a-eng
           PRODUCTEOF
 
           # Rename omni_apollo.mk to twrp_apollo.mk
@@ -166,22 +168,8 @@ jobs:
           cat > device/xiaomi/apollo/release/ap1a.mk << 'RELEOF'
           # Release config for Android 16
           PRODUCT_RELEASE_NAME := ap1a
-          RELEOF
-          
-          # Create release config for Android 16 trunk_staging
-          echo "Creating release config..."
-          mkdir -p build/release/trunk_staging
-          cat > build/release/trunk_staging/release-config.pb << 'RCEOF'
-          flag {
-            name: "release_config"
-            value: "trunk_staging"
-          }
-          RCEOF
-          mkdir -p build/release
-          cat > build/release/trunk_staging.textproto << 'TXTEOF'
-          name: "trunk_staging"
-          TXTEOF          
-          
+          RELEOF      
+        
           echo "=== Patched files ==="
           cat device/xiaomi/apollo/AndroidProducts.mk
           echo "---"
@@ -195,14 +183,8 @@ jobs:
           export BUILD_BROKEN_USES_BUILD_COPY_FILES=true
           source build/envsetup.sh
 
-          # First lunch a known target to set up release config properly
-          lunch aosp_arm64-ap1a-eng 2>/dev/null || lunch aosp_arm64-eng 2>/dev/null || true
-
-          # Then override with our device
-          export TARGET_PRODUCT=twrp_apollo
-          export TARGET_BUILD_VARIANT=eng
-          export TARGET_RELEASE=trunk_staging
-          export RELEASE_CONFIG=trunk_staging
+          # Use bp2a release config (trunk_staging is not supported in Android 16)
+          lunch twrp_apollo-bp2a-eng
 
           echo "Building with TARGET_PRODUCT=$TARGET_PRODUCT, TARGET_BUILD_VARIANT=$TARGET_BUILD_VARIANT"
           echo "TARGET_RELEASE=$TARGET_RELEASE"
