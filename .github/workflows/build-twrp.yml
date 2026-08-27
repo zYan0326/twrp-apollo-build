@@ -161,6 +161,13 @@ jobs:
               init.recovery.qcom_decrypt.rc
           TWRPEOF
 
+          # Add release config for Android 16
+          mkdir -p device/xiaomi/apollo/release
+          cat > device/xiaomi/apollo/release/ap1a.mk << 'RELEOF'
+          # Release config for Android 16
+          PRODUCT_RELEASE_NAME := ap1a
+          RELEOF
+          
           echo "=== Patched files ==="
           cat device/xiaomi/apollo/AndroidProducts.mk
           echo "---"
@@ -174,13 +181,15 @@ jobs:
           export BUILD_BROKEN_USES_BUILD_COPY_FILES=true
           source build/envsetup.sh
 
-          # Use environment variables instead of lunch to avoid format issues
+          # First lunch a known target to set up release config properly
+          lunch aosp_arm64-ap1a-eng 2>/dev/null || lunch aosp_arm64-eng 2>/dev/null || true
+
+          # Then override with our device
           export TARGET_PRODUCT=twrp_apollo
           export TARGET_BUILD_VARIANT=eng
-          export TARGET_BUILD_TYPE=release
-          export TARGET_BUILD_APPS=
 
           echo "Building with TARGET_PRODUCT=$TARGET_PRODUCT, TARGET_BUILD_VARIANT=$TARGET_BUILD_VARIANT"
+          echo "TARGET_RELEASE=$TARGET_RELEASE"
           mka recoveryimage -j2 2>&1 | tee /tmp/build_full.log | tail -500
           echo "=== Build completed, checking output ==="
 
