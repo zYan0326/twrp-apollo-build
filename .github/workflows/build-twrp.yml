@@ -168,6 +168,20 @@ jobs:
           PRODUCT_RELEASE_NAME := ap1a
           RELEOF
           
+          # Create release config for Android 16 trunk_staging
+          echo "Creating release config..."
+          mkdir -p build/release/trunk_staging
+          cat > build/release/trunk_staging/release-config.pb << 'RCEOF'
+          flag {
+            name: "release_config"
+            value: "trunk_staging"
+          }
+          RCEOF
+          mkdir -p build/release
+          cat > build/release/trunk_staging.textproto << 'TXTEOF'
+          name: "trunk_staging"
+          TXTEOF          
+          
           echo "=== Patched files ==="
           cat device/xiaomi/apollo/AndroidProducts.mk
           echo "---"
@@ -187,6 +201,8 @@ jobs:
           # Then override with our device
           export TARGET_PRODUCT=twrp_apollo
           export TARGET_BUILD_VARIANT=eng
+          export TARGET_RELEASE=trunk_staging
+          export RELEASE_CONFIG=trunk_staging
 
           echo "Building with TARGET_PRODUCT=$TARGET_PRODUCT, TARGET_BUILD_VARIANT=$TARGET_BUILD_VARIANT"
           echo "TARGET_RELEASE=$TARGET_RELEASE"
