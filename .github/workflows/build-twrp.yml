@@ -46,7 +46,7 @@ jobs:
           echo "============================================"
           echo "Device: ${{ github.event.inputs.device || 'apollo' }}"
           echo "Manifest: $MANIFEST_URL ($MANIFEST_BRANCH)"
-          echo "Lunch: $LUNCH_TARGET-eng"
+          echo "Lunch: twrp_apollo-bp2a-eng"
           echo "Runner: ubuntu-22.04 (2-core, 7GB RAM + 8GB swap)"
           echo "============================================"
 
@@ -111,70 +111,184 @@ jobs:
           cd ~/android/twrp
           git clone --depth=1 -b android-11 https://github.com/TeamWin/android_device_qcom_twrp-common.git device/qcom/twrp-common
 
-      - name: Patch device tree for Android 16 compatibility
+      - name: Rewrite device tree for Android 16 TWRP
         run: |
           cd ~/android/twrp
+          DEVICE_PATH=device/xiaomi/apollo
 
-          # Patch AndroidProducts.mk
-          cat > device/xiaomi/apollo/AndroidProducts.mk << 'PRODUCTEOF'
+          echo "=== Backing up original files ==="
+          cp $DEVICE_PATH/BoardConfig.mk $DEVICE_PATH/BoardConfig.mk.bak
+          cp $DEVICE_PATH/omni_apollo.mk $DEVICE_PATH/omni_apollo.mk.bak 2>/dev/null || true
+
+          echo "=== Rewriting AndroidProducts.mk ==="
+          cat > $DEVICE_PATH/AndroidProducts.mk << 'APMKEOF'
           PRODUCT_MAKEFILES := \
               $(LOCAL_DIR)/twrp_apollo.mk
+
           COMMON_LUNCH_CHOICES := \
               twrp_apollo-bp2a-eng
-          PRODUCTEOF
+          APMKEOF
 
-          # Rename omni_apollo.mk to twrp_apollo.mk and fix references
-          if [ -f device/xiaomi/apollo/omni_apollo.mk ]; then
-            cp device/xiaomi/apollo/omni_apollo.mk device/xiaomi/apollo/twrp_apollo.mk
-          fi
-          # Replace vendor/omni/config/common.mk with TWRP AOSP equivalent
-          sed -i 's|vendor/omni/config/common.mk|$(SRC_TARGET_DIR)/product/full.mk|g' device/xiaomi/apollo/twrp_apollo.mk
-          # Also fix PRODUCT_NAME from omni_ to twrp_
-          sed -i 's|PRODUCT_NAME := omni_apollo|PRODUCT_NAME := twrp_apollo|g' device/xiaomi/apollo/twrp_apollo.mk
-          # Patch BoardConfig.mk for Android 16 FBE decryption
-          cat >> device/xiaomi/apollo/BoardConfig.mk << 'BCFGEOF'
+          echo "=== Rewriting twrp_apollo.mk ==="
+          cat > $DEVICE_PATH/twrp_apollo.mk << 'PRODEOF'
+          #
+          # TWRP product configuration for Xiaomi Mi 10T / Redmi K30S Ultra (apollo)
+          # Compatible with Android 16 TWRP build system
+          #
 
-          # === Android 16 FBE Decryption Patches ===
-          BOARD_USES_QCOM_FBE_DECRYPTION := true
-          TW_INCLUDE_CRYPTO := true
-          TW_INCLUDE_CRYPTO_FBE := true
-          TW_INCLUDE_FBE_METADATA_DECRYPT := true
-          TW_USE_FSCRYPT_POLICY := 2
-          BOARD_USES_METADATA_PARTITION := true
-          BOARD_EXCLUDE_KERNEL_FROM_RECOVERY_IMAGE := true
-          BOARD_RAMDISK_USE_LZ4 := true
-          BOARD_USES_RECOVERY_AS_BOOT := false
-          AB_OTA_UPDATER := true
+          PRODUCT_RELEASE_NAME := apollo
+          DEVICE_PATH := device/xiaomi/apollo
+
+          # Inherit core minimal product
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_minimal.mk)
+
+          # Device identifier
+          PRODUCT_DEVICE := apollo
+          PRODUCT_NAME := twrp_apollo
+          PRODUCT_BRAND := Xiaomi
+          PRODUCT_MODEL := M2007J3SG
+          PRODUCT_MANUFACTURER := Xiaomi
+
+          # Vendor security patch hack
+          PRODUCT_PROPERTY_OVERRIDES += \
+              ro.vendor.build.security_patch=2099-12-31
+
+          # TWRP packages
+          PRODUCT_PACKAGES += \
+              fastbootd
+          PRODEOF
+
+          echo "=== Rewriting BoardConfig.mk ==="
+          cat > $DEVICE_PATH/BoardConfig.mk << 'BCEOF'
+          #
+          # Board configuration for Xiaomi Mi 10T / Redmi K30S Ultra (apollo)
+          # Rewritten for Android 16 TWRP compatibility
+          #
+
+          # Architecture
+          TARGET_ARCH := arm64
+          TARGET_ARCH_VARIANT := armv8-a
+          TARGET_CPU_ABI := arm64-v8a
+          TARGET_CPU_ABI2 :=
+          TARGET_CPU_VARIANT := kryo
+
+          TARGET_2ND_ARCH := arm
+          TARGET_2ND_ARCH_VARIANT := armv8-a
+          TARGET_2ND_CPU_ABI := armeabi-v7a
+          TARGET_2ND_CPU_ABI2 := armeabi
+          TARGET_2ND_CPU_VARIANT := cortex-a73
+
+          # Platform
+          TARGET_BOARD_PLATFORM := kona
+          TARGET_BOARD_PLATFORM_GPU := qcom-adreno650
+          TARGET_BOOTLOADER_BOARD_NAME := kona
+          PRODUCT_PLATFORM := kona
+          TARGET_NO_BOOLLOADER := true
+          QCOM_BOARD_PLATFORMS += kona
+
+          # Kernel (prebuilt from device tree)
+          BOARD_KERNEL_CMDLINE := console=ttyMSM0,115200n8 androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 video=vfb:640x400,bpp=32,memsize=3072000 msm_rtb.filter=0x237 service_locator.enable=1 androidboot.usbcontroller=a600000.dwc3 swiotlb=2048 loop.max_part=7 cgroup.memory=nokmem,nosocket
+          BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive androidboot.init_fatal_reboot_target=recovery
+          BOARD_KERNEL_IMAGE_NAME := Image
+          BOARD_KERNEL_PAGESIZE := 4096
+          BOARD_BOOT_HEADER_VERSION := 2
+          BOARD_KERNEL_BASE := 0x00000000
+          BOARD_KERNEL_TAGS_OFFSET := 0x00000100
+          BOARD_KERNEL_OFFSET := 0x00008000
+          BOARD_KERNEL_SECOND_OFFSET := 0x00f00000
+          BOARD_RAMDISK_OFFSET := 0x01000000
+          BOARD_DTB_OFFSET := 0x01f00000
+          TARGET_KERNEL_ARCH := arm64
+          TARGET_PREBUILT_DTB := $(DEVICE_PATH)/prebuilt/dtb
+          TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel
+          BOARD_PREBUILT_DTBOIMAGE := $(DEVICE_PATH)/prebuilt/recovery_dtbo
+          BOARD_INCLUDE_RECOVERY_DTBO := true
+          BOARD_INCLUDE_DTB_IN_BOOTIMG := true
+          BOARD_MKBOOTIMG_ARGS += --base $(BOARD_KERNEL_BASE)
+          BOARD_MKBOOTIMG_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
+          BOARD_MKBOOTIMG_ARGS += --ramdisk_offset $(BOARD_RAMDISK_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --tags_offset $(BOARD_KERNEL_TAGS_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --kernel_offset $(BOARD_KERNEL_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --second_offset $(BOARD_KERNEL_SECOND_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --dtb_offset $(BOARD_DTB_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOT_HEADER_VERSION)
+          BOARD_MKBOOTIMG_ARGS += --dtb $(TARGET_PREBUILT_DTB)
+
+          # Assert
+          TARGET_OTA_ASSERT_DEVICE := apollo,apollopro
+
+          # AVB
           BOARD_AVB_ENABLE := true
-          TW_FORCE_SELINUX_PERMISSIVE := true
-          TW_NO_AUTO_DECRYPT := true
+          BOARD_AVB_ROLLBACK_INDEX := $(PLATFORM_SECURITY_PATCH_TIMESTAMP)
+
+          # Partitions
+          BOARD_FLASH_BLOCK_SIZE := 262144
+          BOARD_BOOTIMAGE_PARTITION_SIZE := 134217728
+          BOARD_RECOVERYIMAGE_PARTITION_SIZE := 134217728
+
+          # Dynamic Partitions
           BOARD_SUPER_PARTITION_SIZE := 9126805504
           BOARD_SUPER_PARTITION_GROUPS := qti_dynamic_partitions
           BOARD_QTI_DYNAMIC_PARTITIONS_SIZE := 9126805504
           BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST := product vendor system system_ext odm
-          BCFGEOF
 
-          # Patch twrp_apollo.mk for Android 16
-          cat >> device/xiaomi/apollo/twrp_apollo.mk << 'TWRPEOF'
+          # Virtual A/B
+          AB_OTA_UPDATER := true
 
-          # === Android 16 TWRP additions ===
-          PRODUCT_PACKAGES += \
-              qseecomd \
-              prepdecrypt.sh \
-              init.recovery.qcom_decrypt.rc
-          TWRPEOF
+          # File systems
+          TARGET_USERIMAGES_USE_EXT4 := true
+          TARGET_USERIMAGES_USE_F2FS := true
+          BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
+          TARGET_COPY_OUT_VENDOR := vendor
 
-          # Add release config for Android 16
-          mkdir -p device/xiaomi/apollo/release
-          cat > device/xiaomi/apollo/release/ap1a.mk << 'RELEOF'
-          # Release config for Android 16
-          PRODUCT_RELEASE_NAME := ap1a
-          RELEOF      
-        
-          echo "=== Patched files ==="
-          cat device/xiaomi/apollo/AndroidProducts.mk
-          echo "---"
-          tail -30 device/xiaomi/apollo/BoardConfig.mk
+          # Recovery
+          BOARD_HAS_LARGE_FILESYSTEM := true
+          TARGET_RECOVERY_PIXEL_FORMAT := BGRA_8888
+          BOARD_USES_METADATA_PARTITION := true
+
+          # Crypto / FBE Decryption
+          PLATFORM_SECURITY_PATCH := 2099-12-31
+          VENDOR_SECURITY_PATCH := 2099-12-31
+          TW_INCLUDE_CRYPTO := true
+          TW_INCLUDE_CRYPTO_FBE := true
+          TW_INCLUDE_FBE_METADATA_DECRYPT := true
+          TW_USE_FSCRYPT_POLICY := 2
+          BOARD_USES_QCOM_FBE_DECRYPTION := true
+          BOARD_USES_QCOM_DECRYPTION := true
+
+          # TWRP specific build flags
+          TW_THEME := portrait_hdpi
+          RECOVERY_SDCARD_ON_DATA := true
+          TARGET_RECOVERY_QCOM_RTC_FIX := true
+          TW_EXCLUDE_DEFAULT_USB_INIT := true
+          TW_EXTRA_LANGUAGES := true
+          TW_INCLUDE_NTFS_3G := true
+          TW_INPUT_BLACKLIST := hbtp_vm
+          TW_BRIGHTNESS_PATH := /sys/class/backlight/panel0-backlight/brightness
+          TW_MAX_BRIGHTNESS := 2047
+          TW_DEFAULT_BRIGHTNESS := 1200
+          TWRP_INCLUDE_LOGCAT := true
+          TARGET_USES_LOGD := true
+          TARGET_USES_MKE2FS := true
+          TW_EXCLUDE_TWRPAPP := true
+          TW_NO_SCREEN_BLANK := true
+          TW_HAS_EDL_MODE := true
+          TW_SUPPORT_INPUT_1_2_HAPTICS := true
+          TW_FORCE_SELINUX_PERMISSIVE := true
+          BCEOF
+
+          echo "=== Verification ==="
+          echo "AndroidProducts.mk:"
+          cat $DEVICE_PATH/AndroidProducts.mk
+          echo ""
+          echo "twrp_apollo.mk:"
+          cat $DEVICE_PATH/twrp_apollo.mk
+          echo ""
+          echo "BoardConfig.mk (first 20 lines):"
+          head -20 $DEVICE_PATH/BoardConfig.mk
+          echo "..."
+          echo "BoardConfig.mk (crypto section):"
+          grep -A 5 "Crypto" $DEVICE_PATH/BoardConfig.mk || grep -A 5 "FBE" $DEVICE_PATH/BoardConfig.mk
 
       - name: Build recovery image
         run: |
@@ -184,10 +298,10 @@ jobs:
           export BUILD_BROKEN_USES_BUILD_COPY_FILES=true
           source build/envsetup.sh
 
-          # Use bp2a release config (trunk_staging is not supported in Android 16)
+          # Use bp2a release (trunk_staging is not supported in Android 16)
           lunch twrp_apollo-bp2a-eng
 
-          echo "Building with TARGET_PRODUCT=$TARGET_PRODUCT, TARGET_BUILD_VARIANT=$TARGET_BUILD_VARIANT"
+          echo "Building with TARGET_PRODUCT=$TARGET_PRODUCT"
           echo "TARGET_RELEASE=$TARGET_RELEASE"
           mka recoveryimage -j2 2>&1 | tee /tmp/build_full.log | tail -500
           echo "=== Build completed, checking output ==="
