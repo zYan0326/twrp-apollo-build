@@ -178,6 +178,10 @@ jobs:
           TARGET_2ND_CPU_ABI2 := armeabi
           TARGET_2ND_CPU_VARIANT := cortex-a73
 
+          # 64-bit support
+          TARGET_SUPPORTS_64_BIT_APPS := true
+          TARGET_USES_64_BIT_BINDER := true
+          
           # Platform
           TARGET_BOARD_PLATFORM := kona
           TARGET_BOARD_PLATFORM_GPU := qcom-adreno650
