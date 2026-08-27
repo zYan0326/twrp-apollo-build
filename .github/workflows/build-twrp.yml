@@ -60,8 +60,8 @@ jobs:
             sleep 2
             sudo rm -f /swapfile || true
           fi
-          echo "Creating 8GB swap file..."
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
+          echo "Creating 12GB swap file..."
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=12288 status=progress
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
@@ -193,7 +193,7 @@ jobs:
           TARGET_BOARD_PLATFORM_GPU := qcom-adreno650
           TARGET_BOOTLOADER_BOARD_NAME := kona
           PRODUCT_PLATFORM := kona
-          TARGET_NO_BOOLLOADER := true
+          TARGET_NO_BOOTLOADER := true
           QCOM_BOARD_PLATFORMS += kona
 
           # Kernel (prebuilt from device tree)
@@ -313,8 +313,12 @@ jobs:
 
           echo "Building with TARGET_PRODUCT=$TARGET_PRODUCT"
           echo "TARGET_RELEASE=$TARGET_RELEASE"
-          mka recoveryimage -j2 2>&1 | tee /tmp/build_full.log | tail -500
-          echo "=== Build completed, checking output ==="
+          echo "Memory:"
+          free -h
+          # pipefail: 让 mka 的真实退出码(0/非0)直接决定本 step 成败，不再被 tail 掩盖
+          set -o pipefail
+          mka recoveryimage -j2 2>&1 | tee /tmp/build_full.log | tail -200
+          echo "=== Build step finished with exit code $? ==="
 
       - name: Check build output
         run: |
@@ -341,11 +345,13 @@ jobs:
           path: ~/android/twrp/out/target/product/apollo/recovery.img
           retention-days: 30
 
-      - name: Upload build log on failure
-        if: failure()
+      # 关键修复：日志上传改为 always()，保证无论成功/失败/进程异常退出，
+      # 只要 runner 还能执行步骤，全量编译日志一定进 artifact，便于定位真错误。
+      - name: Upload build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-apollo
           path: /tmp/build_full.log
-          retention-days: 7
-          if-no-files-found: ignore
+          retention-days: 30
+          if-no-files-found: error
