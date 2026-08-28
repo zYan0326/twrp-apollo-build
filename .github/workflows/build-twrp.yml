@@ -315,6 +315,10 @@ jobs:
           echo "TARGET_RELEASE=$TARGET_RELEASE"
           echo "Memory:"
           free -h
+          echo "=== Memory detail (meminfo) ==="
+          grep -E "MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree" /proc/meminfo
+          echo "=== cgroup memory.events (OOM 计数) ==="
+          cat /sys/fs/cgroup/memory.events 2>/dev/null || echo "memory.events not accessible"
 
           # 编译改为后台运行 + 前台心跳输出：
           # 1) 全量日志实时写入 /tmp/build_full.log；
@@ -332,11 +336,18 @@ jobs:
             echo "---- progress @ $(date -u +%H:%M:%S) ----"
             tail -30 /tmp/build_full.log 2>/dev/null
             echo "[heartbeat] build still running ..."
+            echo "[mem] $(free -m | awk '/Mem:/{printf "used=%dMB free=%dMB avail=%dMB", $3, $4, $7}') | $(free -m | awk '/Swap:/{printf "swap_used=%dMB swap_free=%dMB", $3, $4}')"
+            if [ -r /sys/fs/cgroup/memory.events ]; then
+              echo "[cgroup-events] $(tr '\n' ' ' < /sys/fs/cgroup/memory.events)"
+            fi
             sleep 40
           done
           wait $BUILD_JOB
           BUILD_STATUS=$?
           echo "=== Build step exited with status $BUILD_STATUS ==="
+          echo "=== OOM check ==="
+          dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -20 || sudo dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -20 || echo "dmesg not accessible"
+          cat /sys/fs/cgroup/memory.events 2>/dev/null || true
           echo "=== last 80 lines of full build log ==="
           tail -80 /tmp/build_full.log 2>/dev/null
           exit $BUILD_STATUS
