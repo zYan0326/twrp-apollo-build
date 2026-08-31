@@ -60,13 +60,16 @@ jobs:
             sleep 2
             sudo rm -f /swapfile || true
           fi
-          echo "Creating 12GB swap file..."
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=12288 status=progress
+          echo "Creating 24GB swap file..."
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=24576 status=progress
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          # 鏇存縺杩涘湴浣跨敤 swap锛岄檷浣?OOM 琚潃姒傜巼
+          sudo sysctl vm.swappiness=100
           echo "Swap created successfully:"
           free -h
+          echo "swappiness=$(cat /proc/sys/vm/swappiness)"
 
       - name: Free up disk space
         run: |
@@ -317,15 +320,10 @@ jobs:
           free -h
           echo "=== Memory detail (meminfo) ==="
           grep -E "MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree" /proc/meminfo
-          echo "=== cgroup memory.events (OOM 计数) ==="
+          echo "=== cgroup memory.events (OOM 璁℃暟) ==="
           cat /sys/fs/cgroup/memory.events 2>/dev/null || echo "memory.events not accessible"
 
-          # 编译改为后台运行 + 前台心跳输出：
-          # 1) 全量日志实时写入 /tmp/build_full.log；
-          # 2) 前台每 40 秒打印一次日志尾部并输出心跳，保持 runner 与宿主通信，
-          #    避免编译大输出被 tail 吞掉、宿主导致长时间静默失联被 SIGTERM；
-          # 3) 编译结束用哨兵文件准确退出循环，透传 mka 真实退出码。
-          set -o pipefail
+          # 缂栬瘧鏀逛负鍚庡彴杩愯 + 鍓嶅彴蹇冭烦杈撳嚭锛?          # 1) 鍏ㄩ噺鏃ュ織瀹炴椂鍐欏叆 /tmp/build_full.log锛?          # 2) 鍓嶅彴姣?40 绉掓墦鍗颁竴娆℃棩蹇楀熬閮ㄥ苟杈撳嚭蹇冭烦锛屼繚鎸?runner 涓庡涓婚€氫俊锛?          #    閬垮厤缂栬瘧澶ц緭鍑鸿 tail 鍚炴帀銆佸涓诲鑷撮暱鏃堕棿闈欓粯澶辫仈琚?SIGTERM锛?          # 3) 缂栬瘧缁撴潫鐢ㄥ摠鍏垫枃浠跺噯纭€€鍑哄惊鐜紝閫忎紶 mka 鐪熷疄閫€鍑虹爜銆?          set -o pipefail
           rm -f /tmp/build_done
           (
             mka recoveryimage -j1 2>&1 | tee /tmp/build_full.log
@@ -377,9 +375,8 @@ jobs:
           path: ~/android/twrp/out/target/product/apollo/recovery.img
           retention-days: 30
 
-      # 关键修复：日志上传改为 always()，保证无论成功/失败/进程异常退出，
-      # 只要 runner 还能执行步骤，全量编译日志一定进 artifact，便于定位真错误。
-      - name: Upload build log
+      # 鍏抽敭淇锛氭棩蹇椾笂浼犳敼涓?always()锛屼繚璇佹棤璁烘垚鍔?澶辫触/杩涚▼寮傚父閫€鍑猴紝
+      # 鍙 runner 杩樿兘鎵ц姝ラ锛屽叏閲忕紪璇戞棩蹇椾竴瀹氳繘 artifact锛屼究浜庡畾浣嶇湡閿欒銆?      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
