@@ -214,6 +214,7 @@ jobs:
           TARGET_KERNEL_ARCH := arm64
           TARGET_PREBUILT_DTB := $(DEVICE_PATH)/prebuilt/dtb
           TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel
+          BOARD_PREBUILT_DTBIMAGE := $(DEVICE_PATH)/prebuilt/dtb
           BOARD_PREBUILT_DTBOIMAGE := $(DEVICE_PATH)/prebuilt/recovery_dtbo
           BOARD_INCLUDE_RECOVERY_DTBO := true
           BOARD_INCLUDE_DTB_IN_BOOTIMG := true
@@ -225,7 +226,6 @@ jobs:
           BOARD_MKBOOTIMG_ARGS += --second_offset $(BOARD_KERNEL_SECOND_OFFSET)
           BOARD_MKBOOTIMG_ARGS += --dtb_offset $(BOARD_DTB_OFFSET)
           BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOT_HEADER_VERSION)
-          BOARD_MKBOOTIMG_ARGS += --dtb $(TARGET_PREBUILT_DTB)
 
           # Assert
           TARGET_OTA_ASSERT_DEVICE := apollo,apollopro
@@ -342,6 +342,23 @@ jobs:
             echo "[mem] $(free -m | awk '/Mem:/{printf "used=%dMB free=%dMB avail=%dMB", $3, $4, $7}') | $(free -m | awk '/Swap:/{printf "swap_used=%dMB swap_free=%dMB", $3, $4}')"
             if [ -r /sys/fs/cgroup/memory.events ]; then
               echo "[cgroup-events] $(tr '\n' ' ' < /sys/fs/cgroup/memory.events)"
+            fi
+            # 失败检测：出现 ninja 汇总失败标记时，若 mka 仍挂起则强制终止，
+            # 避免重演 Run21 空转近 5 小时直到 6h 超时的悲剧
+            if grep -qE "failed to build some targets|ninja failed with" /tmp/build_full.log 2>/dev/null; then
+              echo "[fail-detect] build failure marker found, waiting up to 60s for mka exit..."
+              for i in 1 2 3; do
+                [ -f /tmp/build_done ] && break
+                sleep 20
+              done
+              if [ ! -f /tmp/build_done ]; then
+                echo "[fail-detect] mka hung after failure, terminating build job"
+                kill $BUILD_JOB 2>/dev/null || true
+                pkill -P $BUILD_JOB 2>/dev/null || true
+                wait $BUILD_JOB 2>/dev/null || true
+                echo "ok" > /tmp/build_done
+              fi
+              break
             fi
             sleep 40
           done
