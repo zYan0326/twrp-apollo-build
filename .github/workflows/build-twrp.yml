@@ -65,7 +65,7 @@ jobs:
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          # 更激进地使用 swap，降低 OOM 被杀概率
+          # æ´æ¿è¿å°ä½¿ç¨ swapï¼éä½ OOM è¢«ææ¦ç
           sudo sysctl vm.swappiness=100
           echo "Swap created successfully:"
           free -h
@@ -130,6 +130,10 @@ jobs:
           cp $DEVICE_PATH/BoardConfig.mk $DEVICE_PATH/BoardConfig.mk.bak
           cp $DEVICE_PATH/omni_apollo.mk $DEVICE_PATH/omni_apollo.mk.bak 2>/dev/null || true
 
+          echo "=== Ensure prebuilt dtb has .dtb extension (AOSP16 requires BOARD_PREBUILT_DTBIMAGE_DIR with *.dtb) ==="
+          ls -la $DEVICE_PATH/prebuilt/
+          cp $DEVICE_PATH/prebuilt/dtb $DEVICE_PATH/prebuilt/apollo.dtb 2>/dev/null || echo "WARN: prebuilt/dtb not found"
+
           echo "=== Rewriting AndroidProducts.mk ==="
           cat > $DEVICE_PATH/AndroidProducts.mk << 'APMKEOF'
           PRODUCT_MAKEFILES := \
@@ -150,7 +154,7 @@ jobs:
           DEVICE_PATH := device/xiaomi/apollo
 
           # Inherit core minimal product
-          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_minimal.mk)
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_ninimal.mk)
 
           # Device identifier
           PRODUCT_DEVICE := apollo
@@ -214,7 +218,7 @@ jobs:
           TARGET_KERNEL_ARCH := arm64
           TARGET_PREBUILT_DTB := $(DEVICE_PATH)/prebuilt/dtb
           TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel
-          BOARD_PREBUILT_DTBIMAGE := $(DEVICE_PATH)/prebuilt/dtb
+          BOARD_PREBUILT_DTBIMAGE_DIR := $(DEVICE_PATH)/prebuilt
           BOARD_PREBUILT_DTBOIMAGE := $(DEVICE_PATH)/prebuilt/recovery_dtbo
           BOARD_INCLUDE_RECOVERY_DTBO := true
           BOARD_INCLUDE_DTB_IN_BOOTIMG := true
@@ -318,16 +322,17 @@ jobs:
           echo "TARGET_RELEASE=$TARGET_RELEASE"
           echo "Memory:"
           free -h
+
           echo "=== Memory detail (meminfo) ==="
           grep -E "MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree" /proc/meminfo
-          echo "=== cgroup memory.events (OOM 计数) ==="
+          echo "=== cgroup memory.events (OOM count) ==="
           cat /sys/fs/cgroup/memory.events 2>/dev/null || echo "memory.events not accessible"
 
-          # 编译改为后台运行 + 前台心跳输出：
-          # 1) 全量日志实时写入 /tmp/build_full.log；
-          # 2) 前台每 40 秒打印一次日志尾部并输出心跳，保持 runner 与宿主通信，
-          #    避免编译大输出被 tail 吞掉、宿主导致长时间静默失联被 SIGTERM；
-          # 3) 编译结束用哨兵文件准确退出循环，透传 mka 真实退出码。
+          # ç¼è¯æ¹ä¸ºåå°è¿è¡ + åå°å¿è·³è¾åºï¼
+          # 1) å¨éæ¥å¿å®æ¶åå¥ /tmp/build_full.logï¼
+          # 2) åå°æ¯ 40 ç§æå°ä¸æ¬¡æ¥å¿å°¾é¨å¹¶è¾åºå¿è·³ï¼ä¿æ runner ä¸å®¿ä¸»éä¿¡ï¼
+          #    é¿åç¼è¯å¤§è¾åºè¢« tail åæãå®¿ä¸»å¯¼è´é¿æ¶é´éé»å¤±èè¢« SIGTERMï¼
+          # 3) ç¼è¯ç»æç¨å¨åµæä»¶åç¡®éåºå¾ªç¯ï¼éä¼  mka çå®éåºç ã
           set -o pipefail
           rm -f /tmp/build_done
           (
@@ -343,67 +348,9 @@ jobs:
             if [ -r /sys/fs/cgroup/memory.events ]; then
               echo "[cgroup-events] $(tr '\n' ' ' < /sys/fs/cgroup/memory.events)"
             fi
-            # 失败检测：出现 ninja 汇总失败标记时，若 mka 仍挂起则强制终止，
-            # 避免重演 Run21 空转近 5 小时直到 6h 超时的悲剧
+            # å¤±è´¥æ£æµï¼åºç° ninja æ±æ»å¤±è´¥æ è®°æ¶ï¼è¥ mka ä»æèµ·å æ¥ï¼å¯éè¿éäº Run21 ç©ºè½¬è¿ 5 å°æ¶ç´å° 6h è¶æ¶çæ²å§
             if grep -qE "failed to build some targets|ninja failed with" /tmp/build_full.log 2>/dev/null; then
               echo "[fail-detect] build failure marker found, waiting up to 60s for mka exit..."
               for i in 1 2 3; do
                 [ -f /tmp/build_done ] && break
                 sleep 20
-              done
-              if [ ! -f /tmp/build_done ]; then
-                echo "[fail-detect] mka hung after failure, terminating build job"
-                kill $BUILD_JOB 2>/dev/null || true
-                pkill -P $BUILD_JOB 2>/dev/null || true
-                wait $BUILD_JOB 2>/dev/null || true
-                echo "ok" > /tmp/build_done
-              fi
-              break
-            fi
-            sleep 40
-          done
-          wait $BUILD_JOB
-          BUILD_STATUS=$?
-          echo "=== Build step exited with status $BUILD_STATUS ==="
-          echo "=== OOM check ==="
-          dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -20 || sudo dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -20 || echo "dmesg not accessible"
-          cat /sys/fs/cgroup/memory.events 2>/dev/null || true
-          echo "=== last 80 lines of full build log ==="
-          tail -80 /tmp/build_full.log 2>/dev/null
-          exit $BUILD_STATUS
-
-      - name: Check build output
-        run: |
-          cd ~/android/twrp
-          if [ -f out/target/product/apollo/recovery.img ]; then
-            echo "=== BUILD SUCCESSFUL ==="
-            ls -la out/target/product/apollo/recovery.img
-            md5sum out/target/product/apollo/recovery.img
-          else
-            echo "=== BUILD FAILED ==="
-            echo "Looking for recovery.img..."
-            find out/ -name "recovery.img" 2>/dev/null || echo "No recovery.img found"
-            echo ""
-            echo "Last 200 lines of build log:"
-            tail -200 /tmp/build_full.log 2>/dev/null || echo "No build log found"
-            exit 1
-          fi
-
-      - name: Upload recovery image
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: twrp-apollo-android16-recovery
-          path: ~/android/twrp/out/target/product/apollo/recovery.img
-          retention-days: 30
-
-      # 关键修复：日志上传改为 always()，保证无论成功/失败/进程异常退出，
-      # 只要 runner 还能执行步骤，全量编译日志一定进 artifact，便于定位真错误。
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-apollo
-          path: /tmp/build_full.log
-          retention-days: 30
-          if-no-files-found: error
