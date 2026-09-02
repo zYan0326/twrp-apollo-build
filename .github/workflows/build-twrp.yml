@@ -1,0 +1,413 @@
+name: Build TWRP for Apollo (Android 16 FBE Decrypt)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Device codename'
+        required: true
+        default: 'apollo'
+      manifest_branch:
+        description: 'TWRP manifest branch'
+        required: true
+        default: 'twrp-16.0'
+      lunch_target:
+        description: 'Lunch target (without -eng)'
+        required: true
+        default: 'twrp_apollo'
+      clean_build:
+        description: 'Clean build (slower but safer)'
+        type: boolean
+        required: false
+        default: true
+
+env:
+  MANIFEST_URL: https://github.com/TWRP-Test/platform_manifest_twrp_aosp.git
+  MANIFEST_BRANCH: twrp-16.0
+  DEVICE_TREE_URL: https://github.com/PitchBlackRecoveryDevices/android_device_xiaomi_apollo
+  DEVICE_TREE_BRANCH: android-10.0
+  DEVICE_CODE: apollo
+  LUNCH_TARGET: twrp_apollo
+  USE_CCACHE: 1
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_EXEC: /usr/bin/ccache
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Display configuration
+        run: |
+          echo "============================================"
+          echo "  TWRP Build for Apollo (Mi 10T / K30S Ultra)"
+          echo "  Android 16 FBE Decryption Support"
+          echo "============================================"
+          echo "Device: ${{ github.event.inputs.device || 'apollo' }}"
+          echo "Manifest: $MANIFEST_URL ($MANIFEST_BRANCH)"
+          echo "Lunch: twrp_apollo-bp2a-eng"
+          echo "Runner: ubuntu-22.04 (2-core, 7GB RAM + 8GB swap)"
+          echo "============================================"
+
+      - name: Create swap space
+        run: |
+          echo "Checking existing swap..."
+          sudo swapon --show
+          if sudo swapon --show | grep -q swapfile; then
+            echo "Deactivating existing swapfile..."
+            sudo swapoff /swapfile || true
+            sleep 2
+            sudo rm -f /swapfile || true
+          fi
+          echo "Creating 24GB swap file..."
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=24576 status=progress
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          # 更激进地使用 swap，降低 OOM 被杀概率
+          sudo sysctl vm.swappiness=100
+          echo "Swap created successfully:"
+          free -h
+          echo "swappiness=$(cat /proc/sys/vm/swappiness)"
+
+      - name: Free up disk space
+        run: |
+          echo "Disk space before cleanup:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          sudo apt-get clean
+          echo "Disk space after cleanup:"
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl \
+            zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
+            libncurses-dev lib32ncurses-dev x11proto-core-dev libx11-dev \
+            lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig \
+            python3 python3-pip repo bc ccache rsync libssl-dev \
+            liblz4-tool lz4 zstd
+
+      - name: Set up ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-apollo-twrp-${{ github.sha }}
+          restore-keys: |
+            ccache-apollo-twrp-
+
+      - name: Configure git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global color.ui false
+
+      - name: Initialize TWRP source
+        run: |
+          mkdir -p ~/android/twrp
+          cd ~/android/twrp
+          repo init --depth=1 -u $MANIFEST_URL -b $MANIFEST_BRANCH
+          repo sync -c --no-tags --no-clone-bundle -j4
+
+      - name: Clone device tree
+        run: |
+          cd ~/android/twrp
+          git clone --depth=1 -b $DEVICE_TREE_BRANCH $DEVICE_TREE_URL device/xiaomi/apollo
+
+      - name: Clone TWRP Qualcomm common (for FBE decryption services)
+        run: |
+          cd ~/android/twrp
+          git clone --depth=1 -b android-11 https://github.com/TeamWin/android_device_qcom_twrp-common.git device/qcom/twrp-common
+
+      - name: Rewrite device tree for Android 16 TWRP
+        run: |
+          cd ~/android/twrp
+          DEVICE_PATH=device/xiaomi/apollo
+
+          echo "=== Backing up original files ==="
+          cp $DEVICE_PATH/BoardConfig.mk $DEVICE_PATH/BoardConfig.mk.bak
+          cp $DEVICE_PATH/omni_apollo.mk $DEVICE_PATH/omni_apollo.mk.bak 2>/dev/null || true
+
+          echo "=== Ensure prebuilt dtb has .dtb extension (AOSP16 requires BOARD_PREBUILT_DTBIMAGE_DIR with *.dtb) ==="
+          ls -la $DEVICE_PATH/prebuilt/
+          cp $DEVICE_PATH/prebuilt/dtb $DEVICE_PATH/prebuilt/apollo.dtb 2>/dev/null || echo "WARN: prebuilt/dtb not found"
+
+          echo "=== Rewriting AndroidProducts.mk ==="
+          cat > $DEVICE_PATH/AndroidProducts.mk << 'APMKEOF'
+          PRODUCT_MAKEFILES := \
+              $(LOCAL_DIR)/twrp_apollo.mk
+
+          COMMON_LUNCH_CHOICES := \
+              twrp_apollo-bp2a-eng
+          APMKEOF
+
+          echo "=== Rewriting twrp_apollo.mk ==="
+          cat > $DEVICE_PATH/twrp_apollo.mk << 'PRODEOF'
+          #
+          # TWRP product configuration for Xiaomi Mi 10T / Redmi K30S Ultra (apollo)
+          # Compatible with Android 16 TWRP build system
+          #
+
+          PRODUCT_RELEASE_NAME := apollo
+          DEVICE_PATH := device/xiaomi/apollo
+
+          # Inherit core minimal product
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_ninimal.mk)
+
+          # Device identifier
+          PRODUCT_DEVICE := apollo
+          PRODUCT_NAME := twrp_apollo
+          PRODUCT_BRAND := Xiaomi
+          PRODUCT_MODEL := M2007J3SG
+          PRODUCT_MANUFACTURER := Xiaomi
+
+          # Vendor security patch hack
+          PRODUCT_PROPERTY_OVERRIDES += \
+              ro.vendor.build.security_patch=2099-12-31
+
+          # TWRP packages
+          PRODUCT_PACKAGES += \
+              fastbootd
+          PRODEOF
+
+          echo "=== Rewriting BoardConfig.mk ==="
+          cat > $DEVICE_PATH/BoardConfig.mk << 'BCEOF'
+          #
+          # Board configuration for Xiaomi Mi 10T / Redmi K30S Ultra (apollo)
+          # Rewritten for Android 16 TWRP compatibility
+          #
+
+          # Architecture
+          TARGET_ARCH := arm64
+          TARGET_ARCH_VARIANT := armv8-a
+          TARGET_CPU_ABI := arm64-v8a
+          TARGET_CPU_ABI2 :=
+          TARGET_CPU_VARIANT := kryo
+
+          TARGET_2ND_ARCH := arm
+          TARGET_2ND_ARCH_VARIANT := armv8-a
+          TARGET_2ND_CPU_ABI := armeabi-v7a
+          TARGET_2ND_CPU_ABI2 := armeabi
+          TARGET_2ND_CPU_VARIANT := cortex-a73
+
+          # 64-bit support
+          TARGET_SUPPORTS_64_BIT_APPS := true
+
+          # Platform
+          TARGET_BOARD_PLATFORM := kona
+          TARGET_BOARD_PLATFORM_GPU := qcom-adreno650
+          TARGET_BOOTLOADER_BOARD_NAME := kona
+          PRODUCT_PLATFORM := kona
+          TARGET_NO_BOOTLOADER := true
+          QCOM_BOARD_PLATFORMS += kona
+
+          # Kernel (prebuilt from device tree)
+          BOARD_KERNEL_CMDLINE := console=ttyMSM0,115200n8 androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 video=vfb:640x400,bpp=32,memsize=3072000 msm_rtb.filter=0x237 service_locator.enable=1 androidboot.usbcontroller=a600000.dwc3 swiotlb=2048 loop.max_part=7 cgroup.memory=nokmem,nosocket
+          BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive androidboot.init_fatal_reboot_target=recovery
+          BOARD_KERNEL_IMAGE_NAME := Image
+          BOARD_KERNEL_PAGESIZE := 4096
+          BOARD_BOOT_HEADER_VERSION := 2
+          BOARD_KERNEL_BASE := 0x00000000
+          BOARD_KERNEL_TAGS_OFFSET := 0x00000100
+          BOARD_KERNEL_OFFSET := 0x00008000
+          BOARD_KERNEL_SECOND_OFFSET := 0x00f00000
+          BOARD_RAMDISK_OFFSET := 0x01000000
+          BOARD_DTB_OFFSET := 0x01f00000
+          TARGET_KERNEL_ARCH := arm64
+          TARGET_PREBUILT_DTB := $(DEVICE_PATH)/prebuilt/dtb
+          TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel
+          BOARD_PREBUILT_DTBIMAGE_DIR := $(DEVICE_PATH)/prebuilt
+          BOARD_PREBUILT_DTBOIMAGE := $(DEVICE_PATH)/prebuilt/recovery_dtbo
+          BOARD_INCLUDE_RECOVERY_DTBO := true
+          BOARD_INCLUDE_DTB_IN_BOOTIMG := true
+          BOARD_MKBOOTIMG_ARGS += --base $(BOARD_KERNEL_BASE)
+          BOARD_MKBOOTIMG_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
+          BOARD_MKBOOTIMG_ARGS += --ramdisk_offset $(BOARD_RAMDISK_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --tags_offset $(BOARD_KERNEL_TAGS_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --kernel_offset $(BOARD_KERNEL_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --second_offset $(BOARD_KERNEL_SECOND_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --dtb_offset $(BOARD_DTB_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOT_HEADER_VERSION)
+
+          # Assert
+          TARGET_OTA_ASSERT_DEVICE := apollo,apollopro
+
+          # AVB
+          BOARD_AVB_ENABLE := true
+          BOARD_AVB_ROLLBACK_INDEX := $(PLATFORM_SECURITY_PATCH_TIMESTAMP)
+
+          # Partitions
+          BOARD_FLASH_BLOCK_SIZE := 262144
+          BOARD_BOOTIMAGE_PARTITION_SIZE := 134217728
+          BOARD_RECOVERYIMAGE_PARTITION_SIZE := 134217728
+
+          # Dynamic Partitions
+          BOARD_SUPER_PARTITION_SIZE := 9126805504
+          BOARD_SUPER_PARTITION_GROUPS := qti_dynamic_partitions
+          BOARD_QTI_DYNAMIC_PARTITIONS_SIZE := 9126805504
+          BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST := product vendor system system_ext odm
+
+          # Virtual A/B
+          AB_OTA_UPDATER := true
+
+          # File systems
+          TARGET_USERIMAGES_USE_EXT4 := true
+          TARGET_USERIMAGES_USE_F2FS := true
+          BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
+          TARGET_COPY_OUT_VENDOR := vendor
+
+          # Recovery
+          BOARD_HAS_LARGE_FILESYSTEM := true
+          TARGET_RECOVERY_PIXEL_FORMAT := BGRA_8888
+          BOARD_USES_METADATA_PARTITION := true
+
+          # Crypto / FBE Decryption
+          PLATFORM_SECURITY_PATCH := 2099-12-31
+          VENDOR_SECURITY_PATCH := 2099-12-31
+          TW_INCLUDE_CRYPTO := true
+          TW_INCLUDE_CRYPTO_FBE := true
+          TW_INCLUDE_FBE_METADATA_DECRYPT := true
+          TW_USE_FSCRYPT_POLICY := 2
+          BOARD_USES_QCOM_FBE_DECRYPTION := true
+          BOARD_USES_QCOM_DECRYPTION := true
+
+          # TWRP specific build flags
+          TW_THEME := portrait_hdpi
+          RECOVERY_SDCARD_ON_DATA := true
+          TARGET_RECOVERY_QCOM_RTC_FIX := true
+          TW_EXCLUDE_DEFAULT_USB_INIT := true
+          TW_EXTRA_LANGUAGES := true
+          TW_INCLUDE_NTFS_3G := true
+          TW_INPUT_BLACKLIST := hbtp_vm
+          TW_BRIGHTNESS_PATH := /sys/class/backlight/panel0-backlight/brightness
+          TW_MAX_BRIGHTNESS := 2047
+          TW_DEFAULT_BRIGHTNESS := 1200
+          TWRP_INCLUDE_LOGCAT := true
+          TARGET_USES_LOGD := true
+          TARGET_USES_MKE2FS := true
+          TW_EXCLUDE_TWRPAPP := true
+          TW_NO_SCREEN_BLANK := true
+          TW_HAS_EDL_MODE := true
+          TW_SUPPORT_INPUT_1_2_HAPTICS := true
+          TW_FORCE_SELINUX_PERMISSIVE := true
+          BCEOF
+
+          echo "=== Verification ==="
+          echo "AndroidProducts.mk:"
+          cat $DEVICE_PATH/AndroidProducts.mk
+          echo ""
+          echo "twrp_apollo.mk:"
+          cat $DEVICE_PATH/twrp_apollo.mk
+          echo ""
+          echo "BoardConfig.mk (first 20 lines):"
+          head -20 $DEVICE_PATH/BoardConfig.mk
+          echo "..."
+          echo "BoardConfig.mk (crypto section):"
+          grep -A 5 "Crypto" $DEVICE_PATH/BoardConfig.mk || grep -A 5 "FBE" $DEVICE_PATH/BoardConfig.mk
+
+      - name: Build recovery image
+        run: |
+          cd ~/android/twrp
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export BUILD_BROKEN_DUP_RULES=true
+          export BUILD_BROKEN_USES_BUILD_COPY_FILES=true
+          source build/envsetup.sh
+
+          # Use bp2a release (trunk_staging is not supported in Android 16)
+          lunch twrp_apollo-bp2a-eng
+
+          echo "Building with TARGET_PRODUCT=$TARGET_PRODUCT"
+          echo "TARGET_RELEASE=$TARGET_RELEASE"
+          echo "Memory:"
+          free -h
+          echo "=== Memory detail (meminfo) ==="
+          grep -E "MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree" /proc/meminfo
+          echo "=== cgroup memory.events (OOM 计数) ==="
+          cat /sys/fs/cgroup/memory.events 2>/dev/null || echo "memory.events not accessible"
+
+          # 编译改为后台运行 + 前台心跳输出：
+          # 1) 全量日志实时写入 /tmp/build_full.log；
+          # 2) 前台每 40 秒打印一次日志尾部并输出心跳，保持 runner 与宿主通信，
+          #    避免编译大输出被 tail 吞掉、宿主导致长时间静默失联被 SIGTERM；
+          # 3) 编译结束用哨兵文件准确退出循环，透传 mka 真实退出码。
+          set -o pipefail
+          rm -f /tmp/build_done
+          (
+            mka recoveryimage -j1 2>&1 | tee /tmp/build_full.log
+            echo "ok" > /tmp/build_done
+          ) &
+          BUILD_JOB=$!
+          while [ ! -f /tmp/build_done ]; do
+            echo "---- progress @ $(date -u +%H:%M:%S) ----"
+            tail -30 /tmp/build_full.log 2>/dev/null
+            echo "[heartbeat] build still running ..."
+            echo "[mem] $(free -m | awk '/Mem:/{printf "used=%dMB free=%dMB avail=%dMB", $3, $4, $7}') | $(free -m | awk '/Swap:/{printf "swap_used=%dMB swap_free=%dMB", $3, $4}')"
+            if [ -r /sys/fs/cgroup/memory.events ]; then
+              echo "[cgroup-events] $(tr '\n' ' ' < /sys/fs/cgroup/memory.events)"
+            fi
+            # 失败检测：出现 ninja 汇总失败标记时，若 mka 仍挂起则强制终止，
+            # 避免重演 Run21 空转近 5 小时直到 6h 超时的悲剧
+            if grep -qE "failed to build some targets|ninja failed with" /tmp/build_full.log 2>/dev/null; then
+              echo "[fail-detect] build failure marker found, waiting up to 60s for mka exit..."
+              for i in 1 2 3; do
+                [ -f /tmp/build_done ] && break
+                sleep 20
+              done
+              if [ ! -f /tmp/build_done ]; then
+                echo "[fail-detect] mka hung after failure, terminating build job"
+                kill $BUILD_JOB 2>/dev/null || true
+                pkill -P $BUILD_JOB 2>/dev/null || true
+                wait $BUILD_JOB 2>/dev/null || true
+                echo "ok" > /tmp/build_done
+              fi
+              break
+            fi
+            sleep 40
+          done
+          wait $BUILD_JOB
+          BUILD_STATUS=$?
+          echo "=== Build step exited with status $BUILD_STATUS ==="
+          echo "=== OOM check ==="
+          dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -20 || sudo dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -20 || echo "dmesg not accessible"
+          cat /sys/fs/cgroup/memory.events 2>/dev/null || true
+          echo "=== last 80 lines of full build log ==="
+          tail -80 /tmp/build_full.log 2>/dev/null
+          exit $BUILD_STATUS
+
+      - name: Check build output
+        run: |
+          cd ~/android/twrp
+          if [ -f out/target/product/apollo/recovery.img ]; then
+            echo "=== BUILD SUCCESSFUL ==="
+            ls -la out/target/product/apollo/recovery.img
+            md5sum out/target/product/apollo/recovery.img
+          else
+            echo "=== BUILD FAILED ==="
+            echo "Looking for recovery.img..."
+            find out/ -name "recovery.img" 2>/dev/null || echo "No recovery.img found"
+            echo ""
+            echo "Last 200 lines of build log:"
+            tail -200 /tmp/build_full.log 2>/dev/null || echo "No build log found"
+            exit 1
+          fi
+
+      - name: Upload recovery image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-apollo-android16-recovery
+          path: ~/android/twrp/out/target/product/apollo/recovery.img
+          retention-days: 30
+
+      # 关键修复：日志上传改为 always()，保证无论成功/失败/进程异常退出，
+      # 只要 runner 还能执行步骤，全量编译日志一定进 artifact，便于定位真错误。
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-apollo
+          path: /tmp/build_full.log
+          retention-days: 30
+          if-no-files-found: error
