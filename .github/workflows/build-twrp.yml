@@ -154,7 +154,7 @@ jobs:
           DEVICE_PATH := device/xiaomi/apollo
 
           # Inherit core minimal product
-          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_ninimal.mk)
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_minimal.mk)
 
           # Device identifier
           PRODUCT_DEVICE := apollo
