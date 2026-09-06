@@ -30,7 +30,7 @@ env:
   LUNCH_TARGET: twrp_apollo
   USE_CCACHE: 1
   CCACHE_DIR: /home/runner/.ccache
-  CCACHE_EXEC: /usr/bin/ccache
+  #CCACHE_EXEC: /usr/bin/ccache
 
 jobs:
   build:
