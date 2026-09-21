@@ -108,7 +108,8 @@ jobs:
         run: |
           mkdir -p ~/android/twrp
           cd ~/android/twrp
-          repo init --depth=1 -u $MANIFEST_URL -b $MANIFEST_BRANCH
+          # Use GitHub mirror for repo tool (default gerrit.googlesource.com unreachable in this environment)
+          repo init --repo-url=https://github.com/GerritCodeReview/git-repo --depth=1 -u $MANIFEST_URL -b $MANIFEST_BRANCH
           repo sync -c --no-tags --no-clone-bundle -j4
 
       - name: Clone device tree
