@@ -35,7 +35,7 @@ env:
 jobs:
   build:
     runs-on: self-hosted
-    timeout-minutes: 360
+    timeout-minutes: 720
 
     steps:
       - name: Display configuration
@@ -112,7 +112,7 @@ jobs:
           cd ~/android/twrp
           # Use GitHub mirror for repo tool (default gerrit.googlesource.com unreachable in this environment)
           repo init --repo-url=https://github.com/GerritCodeReview/git-repo --depth=1 -u $MANIFEST_URL -b $MANIFEST_BRANCH
-          repo sync -c --no-tags --no-clone-bundle -j4
+          repo sync -c --no-tags --no-clone-bundle -j8
 
       - name: Clone device tree
         run: |
