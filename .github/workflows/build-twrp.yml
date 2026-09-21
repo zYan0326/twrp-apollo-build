@@ -106,6 +106,8 @@ jobs:
 
       - name: Initialize TWRP source
         run: |
+          # Clean any leftover from previous failed attempts (otherwise "File exists" on .repo/repo)
+          rm -rf ~/android/twrp
           mkdir -p ~/android/twrp
           cd ~/android/twrp
           # Use GitHub mirror for repo tool (default gerrit.googlesource.com unreachable in this environment)
