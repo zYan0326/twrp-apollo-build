@@ -112,6 +112,17 @@ jobs:
           cd ~/android/twrp
           # Use GitHub mirror for repo tool (default gerrit.googlesource.com unreachable in this environment)
           repo init --repo-url=https://github.com/GerritCodeReview/git-repo --no-clone-bundle --depth=1 -u $MANIFEST_URL -b $MANIFEST_BRANCH
+          # Replace google AOSP server with Tsinghua mirror (android.googlesource.com is unreachable from this network)
+          # The fetch URL is rewritten in all manifest xml files and any superproject manifest references.
+          if [ -f .repo/manifest.xml ]; then
+            sed -i 's|https://android.googlesource.com|https://mirrors.tuna.tsinghua.edu.cn/git/AOSP|g' .repo/manifest.xml
+          fi
+          if [ -f .repo/manifests/default.xml ]; then
+            sed -i 's|https://android.googlesource.com|https://mirrors.tuna.tsinghua.edu.cn/git/AOSP|g' .repo/manifests/default.xml
+          fi
+          # Verify rewrite happened
+          echo '=== manifest fetch URL after rewrite ==='
+          grep -h 'fetch=' .repo/manifest.xml .repo/manifests/default.xml 2>/dev/null | head -5 || true
           repo sync -c --no-tags --no-clone-bundle -j8
 
       - name: Clone device tree
