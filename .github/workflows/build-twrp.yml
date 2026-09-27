@@ -129,12 +129,16 @@ jobs:
           # Verify rewrite happened
           echo '=== manifest fetch URL after rewrite ==='
           grep -h 'fetch=' .repo/manifest.xml .repo/manifests/default.xml 2>/dev/null | head -5 || true
-          # Lower concurrency to avoid GitHub rate limiting when fetching many TWRP-Test/LineageOS remotes
-          # Also raise git buffer for large files
+          # Configure git for slow/mirrored networks:
+          # - HTTP/1.1 avoids HTTP/2 framing errors with some proxies
+          # - large postBuffer for big repos (some AOSP submodules are >1GB)
+          # - REMOVE lowSpeedLimit (was set wrongly before; AOSP mirrors are slow by nature)
+          git config --global http.version HTTP/1.1
           git config --global http.postBuffer 524288000
-          git config --global http.lowSpeedLimit 1000
-          git config --global http.lowSpeedTime 60
-          repo sync -c --no-tags --no-clone-bundle -j2 --retry-fetches=3
+          git config --global --unset http.lowSpeedLimit 2>/dev/null || true
+          git config --global --unset http.lowSpeedTime 2>/dev/null || true
+          # Sync with moderate concurrency and retry transient network failures
+          repo sync -c --no-tags --no-clone-bundle -j4 --retry-fetches=5
 
       - name: Clone device tree
         run: |
