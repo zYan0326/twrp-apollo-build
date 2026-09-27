@@ -129,7 +129,12 @@ jobs:
           # Verify rewrite happened
           echo '=== manifest fetch URL after rewrite ==='
           grep -h 'fetch=' .repo/manifest.xml .repo/manifests/default.xml 2>/dev/null | head -5 || true
-          repo sync -c --no-tags --no-clone-bundle -j8
+          # Lower concurrency to avoid GitHub rate limiting when fetching many TWRP-Test/LineageOS remotes
+          # Also raise git buffer for large files
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          repo sync -c --no-tags --no-clone-bundle -j2 --retry-fetches=3
 
       - name: Clone device tree
         run: |
