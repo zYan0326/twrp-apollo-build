@@ -116,10 +116,9 @@ jobs:
       - name: Initialize TWRP source (multi-mirror fallback)
         run: |
           set -e
-          # Clean any leftover from previous failed attempts
-          rm -rf ~/android/twrp ~/manifests-local
           mkdir -p ~/android/twrp
           cd ~/android/twrp
+          # 如果已经有源码了，就不删了，走增量更新
 
           # ==========================================
           # Helper: clone repo with multiple fallback methods
@@ -191,10 +190,18 @@ jobs:
           # ==========================================
           # Step 2: Clone manifest repo manually
           # ==========================================
-          echo "=== Cloning manifest repo ==="
-          if ! try_clone $MANIFEST_URL ~/manifests-local $MANIFEST_BRANCH; then
-            echo "ERROR: Failed to clone manifest repo via all methods"
-            exit 1
+          echo "=== Setting up manifest repo ==="
+          if [ -d ~/manifests-local/.git ]; then
+            echo "Manifest repo already exists, pulling latest..."
+            cd ~/manifests-local
+            git pull
+            cd ~/android/twrp
+          else
+            echo "Manifest repo not found, cloning fresh..."
+            if ! try_clone $MANIFEST_URL ~/manifests-local $MANIFEST_BRANCH; then
+              echo "ERROR: Failed to clone manifest repo via all methods"
+              exit 1
+            fi
           fi
 
           # ==========================================
