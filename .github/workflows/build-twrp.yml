@@ -1,4 +1,4 @@
-name: Build TWRP for Apollo (Android 16 FBE Decrypt)
+﻿name: Build TWRP for Apollo (Android 16 FBE Decrypt)
 
 on:
   workflow_dispatch:
@@ -110,7 +110,7 @@ jobs:
           git config --global http.postBuffer 524288000
           git config --global --unset http.lowSpeedLimit 2>/dev/null || true
           git config --global --unset http.lowSpeedTime 2>/dev/null || true
-          # 先不设代理，后面按需启用
+          # 鍏堜笉璁句唬鐞嗭紝鍚庨潰鎸夐渶鍚敤
           echo "Git configured (no proxy yet)"
 
       - name: Initialize TWRP source (multi-mirror fallback)
@@ -201,7 +201,7 @@ jobs:
           # Step 3: repo init with local manifest dir
           # ==========================================
           echo "=== Running repo init with local manifest ==="
-          repo init --no-clone-bundle --depth=1 --manifest-dir=~/manifests-local -b $MANIFEST_BRANCH
+          repo init --no-clone-bundle --depth=1 -u ~/manifests-local -b $MANIFEST_BRANCH
           echo "repo init succeeded!"
 
           # Replace google AOSP server with Tsinghua mirror
@@ -240,8 +240,7 @@ jobs:
           set -e
           cd ~/android/twrp
 
-          # 复用多镜像克隆函数
-          try_clone() {
+          # 澶嶇敤澶氶暅鍍忓厠闅嗗嚱鏁?          try_clone() {
             local url=$1
             local dest=$2
             local branch=$3
