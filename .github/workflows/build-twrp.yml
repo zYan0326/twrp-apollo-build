@@ -221,7 +221,7 @@ jobs:
           SYNC_SUCCESS=0
           for i in 1 2 3; do
             echo "--- repo sync attempt $i/3 ---"
-            if repo sync -c --no-tags --no-clone-bundle -j4 --retry-fetches=10; then
+            if repo sync -c --no-tags --no-clone-bundle -j2 --retry-fetches=10 --optimized-fetch; then
               echo "repo sync succeeded on attempt $i"
               SYNC_SUCCESS=1
               break
