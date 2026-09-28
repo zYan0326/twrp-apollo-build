@@ -47,11 +47,12 @@ jobs:
           echo "Device: ${{ github.event.inputs.device || 'apollo' }}"
           echo "Manifest: $MANIFEST_URL ($MANIFEST_BRANCH)"
           echo "Lunch: twrp_apollo-bp2a-eng"
-          echo "Runner: ubuntu-22.04 (2-core, 7GB RAM + 8GB swap)"
+          echo "Runner: self-hosted"
           echo "============================================"
 
       - name: Create swap space
         run: |
+          set -e
           echo "Checking existing swap..."
           sudo swapon --show
           if sudo swapon --show | grep -q swapfile; then
@@ -60,12 +61,11 @@ jobs:
             sleep 2
             sudo rm -f /swapfile || true
           fi
-          echo "Creating 24GB swap file..."
+          echo "Creating 8GB swap file..."
           sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          # 更激进地使用 swap，降低 OOM 被杀概率
           sudo sysctl vm.swappiness=100
           echo "Swap created successfully:"
           free -h
@@ -73,6 +73,7 @@ jobs:
 
       - name: Free up disk space
         run: |
+          set -e
           echo "Disk space before cleanup:"
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
@@ -82,6 +83,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -e
           sudo apt-get update
           sudo apt-get install -y git-core gnupg flex bison build-essential zip curl \
             zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
@@ -98,74 +100,152 @@ jobs:
           restore-keys: |
             ccache-apollo-twrp-
 
-      - name: Configure git
+      - name: Configure git and proxy
         run: |
+          set -e
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git config --global color.ui false
+          git config --global http.version HTTP/1.1
+          git config --global http.postBuffer 524288000
+          git config --global --unset http.lowSpeedLimit 2>/dev/null || true
+          git config --global --unset http.lowSpeedTime 2>/dev/null || true
+          # 配置代理（Watt Toolkit on WSL2）
+          git config --global http.proxy http://172.19.144.1:26561
+          git config --global https.proxy http://172.19.144.1:26561
+          export http_proxy=http://172.19.144.1:26561
+          export https_proxy=http://172.19.144.1:26561
+          echo "=== Testing GitHub connectivity ==="
+          for i in 1 2 3 4 5; do
+            if curl -s --connect-timeout 10 -o /dev/null -w "%{http_code}" https://github.com 2>/dev/null | grep -q "200\|301"; then
+              echo "GitHub reachable on attempt $i"
+              break
+            else
+              echo "Attempt $i: GitHub not reachable, retrying in 5s..."
+              sleep 5
+            fi
+          done
 
-      - name: Initialize TWRP source
+      - name: Initialize TWRP source (with retries)
         run: |
-          # Clean any leftover from previous failed attempts (otherwise "File exists" on .repo/repo)
+          set -e
+          # Clean any leftover from previous failed attempts
           rm -rf ~/android/twrp
           mkdir -p ~/android/twrp
           cd ~/android/twrp
-          # Use locally pre-cloned repo source to avoid network issues with gerrit.googlesource.com / GitHub clone.bundle
-          # The runner's setup phase pre-clones GerritCodeReview/git-repo into ~/repo-source/repo on the host.
+
+          # Use locally pre-cloned repo source
           if [ ! -d ~/repo-source/repo/.git ]; then
             echo "Pre-cloning repo source..."
             git clone --depth=1 https://github.com/GerritCodeReview/git-repo.git ~/repo-source/repo
           fi
           export REPO_URL='file://'"$HOME"'/repo-source/repo'
-          repo init --no-clone-bundle --depth=1 -u $MANIFEST_URL -b $MANIFEST_BRANCH
-          # Replace google AOSP server with Tsinghua mirror (android.googlesource.com is unreachable from this network)
-          # The fetch URL is rewritten in all manifest xml files and any superproject manifest references.
+
+          # ==========================================
+          # Retry repo init up to 5 times
+          # ==========================================
+          echo "=== Running repo init with retries ==="
+          INIT_SUCCESS=0
+          for i in 1 2 3 4 5; do
+            echo "--- repo init attempt $i/5 ---"
+            if repo init --no-clone-bundle --depth=1 -u $MANIFEST_URL -b $MANIFEST_BRANCH; then
+              echo "repo init succeeded on attempt $i"
+              INIT_SUCCESS=1
+              break
+            else
+              echo "repo init failed on attempt $i, retrying in 10s..."
+              sleep 10
+              rm -rf .repo
+            fi
+          done
+          if [ "$INIT_SUCCESS" != "1" ]; then
+            echo "ERROR: repo init failed after 5 attempts"
+            exit 1
+          fi
+
+          # Replace google AOSP server with Tsinghua mirror
           if [ -f .repo/manifest.xml ]; then
             sed -i 's|https://android.googlesource.com|https://mirrors.tuna.tsinghua.edu.cn/git/AOSP|g' .repo/manifest.xml
           fi
           if [ -f .repo/manifests/default.xml ]; then
             sed -i 's|https://android.googlesource.com|https://mirrors.tuna.tsinghua.edu.cn/git/AOSP|g' .repo/manifests/default.xml
           fi
-          # Verify rewrite happened
           echo '=== manifest fetch URL after rewrite ==='
           grep -h 'fetch=' .repo/manifest.xml .repo/manifests/default.xml 2>/dev/null | head -5 || true
-          # Configure git for slow/mirrored networks + route through Watt Toolkit proxy:
-          # - HTTP/1.1 avoids HTTP/2 framing errors with some proxies
-          # - large postBuffer for big repos (some AOSP submodules are >1GB)
-          # - REMOVE lowSpeedLimit (was set wrongly before; AOSP mirrors are slow by nature)
-          # - Force proxy: direct connections to github.com fail with GnuTLS recv errors (-54/-110);
-          #   route all git+curl traffic through the host's Watt Toolkit (port 26561 exposed on WSL2 as 172.19.144.1:26561).
-          git config --global http.version HTTP/1.1
-          git config --global http.postBuffer 524288000
-          git config --global --unset http.lowSpeedLimit 2>/dev/null || true
-          git config --global --unset http.lowSpeedTime 2>/dev/null || true
-          git config --global http.proxy http://172.19.144.1:26561
-          git config --global https.proxy http://172.19.144.1:26561
-          export http_proxy=http://172.19.144.1:26561
-          export https_proxy=http://172.19.144.1:26561
-          # Sync with moderate concurrency and retry transient network failures
-          repo sync -c --no-tags --no-clone-bundle -j4 --retry-fetches=5
 
-      - name: Clone device tree
-        run: |
-          cd ~/android/twrp
-          git clone --depth=1 -b $DEVICE_TREE_BRANCH $DEVICE_TREE_URL device/xiaomi/apollo
+          # ==========================================
+          # Retry repo sync up to 3 times
+          # ==========================================
+          echo "=== Running repo sync with retries ==="
+          SYNC_SUCCESS=0
+          for i in 1 2 3; do
+            echo "--- repo sync attempt $i/3 ---"
+            if repo sync -c --no-tags --no-clone-bundle -j4 --retry-fetches=10; then
+              echo "repo sync succeeded on attempt $i"
+              SYNC_SUCCESS=1
+              break
+            else
+              echo "repo sync failed on attempt $i, retrying in 30s..."
+              sleep 30
+            fi
+          done
+          if [ "$SYNC_SUCCESS" != "1" ]; then
+            echo "ERROR: repo sync failed after 3 attempts"
+            exit 1
+          fi
 
-      - name: Clone TWRP Qualcomm common (for FBE decryption services)
+      - name: Clone device tree (with retries)
         run: |
+          set -e
           cd ~/android/twrp
-          git clone --depth=1 -b android-11 https://github.com/TeamWin/android_device_qcom_twrp-common.git device/qcom/twrp-common
+          echo "=== Cloning device tree with retries ==="
+          for i in 1 2 3 4 5; do
+            echo "--- device tree clone attempt $i/5 ---"
+            if git clone --depth=1 -b $DEVICE_TREE_BRANCH $DEVICE_TREE_URL device/xiaomi/apollo; then
+              echo "Device tree clone succeeded on attempt $i"
+              break
+            else
+              echo "Device tree clone failed on attempt $i, retrying in 10s..."
+              sleep 10
+              rm -rf device/xiaomi/apollo
+            fi
+          done
+          if [ ! -d device/xiaomi/apollo ]; then
+            echo "ERROR: device tree clone failed after 5 attempts"
+            exit 1
+          fi
+
+      - name: Clone TWRP Qualcomm common (with retries)
+        run: |
+          set -e
+          cd ~/android/twrp
+          echo "=== Cloning twrp-common with retries ==="
+          for i in 1 2 3 4 5; do
+            echo "--- twrp-common clone attempt $i/5 ---"
+            if git clone --depth=1 -b android-11 https://github.com/TeamWin/android_device_qcom_twrp-common.git device/qcom/twrp-common; then
+              echo "twrp-common clone succeeded on attempt $i"
+              break
+            else
+              echo "twrp-common clone failed on attempt $i, retrying in 10s..."
+              sleep 10
+              rm -rf device/qcom/twrp-common
+            fi
+          done
+          if [ ! -d device/qcom/twrp-common ]; then
+            echo "ERROR: twrp-common clone failed after 5 attempts"
+            exit 1
+          fi
+          touch device/qcom/twrp-common/twrp-common.mk
 
       - name: Rewrite device tree for Android 16 TWRP
         run: |
+          set -e
           cd ~/android/twrp
           DEVICE_PATH=device/xiaomi/apollo
-
           echo "=== Backing up original files ==="
           cp $DEVICE_PATH/BoardConfig.mk $DEVICE_PATH/BoardConfig.mk.bak
           cp $DEVICE_PATH/omni_apollo.mk $DEVICE_PATH/omni_apollo.mk.bak 2>/dev/null || true
-
-          echo "=== Ensure prebuilt dtb has .dtb extension (AOSP16 requires BOARD_PREBUILT_DTBIMAGE_DIR with *.dtb) ==="
+          echo "=== Ensure prebuilt dtb has .dtb extension ==="
           ls -la $DEVICE_PATH/prebuilt/
           cp $DEVICE_PATH/prebuilt/dtb $DEVICE_PATH/prebuilt/apollo.dtb 2>/dev/null || echo "WARN: prebuilt/dtb not found"
 
@@ -173,7 +253,6 @@ jobs:
           cat > $DEVICE_PATH/AndroidProducts.mk << 'APMKEOF'
           PRODUCT_MAKEFILES := \
               $(LOCAL_DIR)/twrp_apollo.mk
-
           COMMON_LUNCH_CHOICES := \
               twrp_apollo-bp2a-eng
           APMKEOF
@@ -184,24 +263,19 @@ jobs:
           # TWRP product configuration for Xiaomi Mi 10T / Redmi K30S Ultra (apollo)
           # Compatible with Android 16 TWRP build system
           #
-
           PRODUCT_RELEASE_NAME := apollo
           DEVICE_PATH := device/xiaomi/apollo
-
           # Inherit core minimal product
           $(call inherit-product, $(SRC_TARGET_DIR)/product/core_minimal.mk)
-
           # Device identifier
           PRODUCT_DEVICE := apollo
           PRODUCT_NAME := twrp_apollo
           PRODUCT_BRAND := Xiaomi
           PRODUCT_MODEL := M2007J3SG
           PRODUCT_MANUFACTURER := Xiaomi
-
           # Vendor security patch hack
           PRODUCT_PROPERTY_OVERRIDES += \
               ro.vendor.build.security_patch=2099-12-31
-
           # TWRP packages
           PRODUCT_PACKAGES += \
               fastbootd
@@ -213,23 +287,19 @@ jobs:
           # Board configuration for Xiaomi Mi 10T / Redmi K30S Ultra (apollo)
           # Rewritten for Android 16 TWRP compatibility
           #
-
           # Architecture
           TARGET_ARCH := arm64
           TARGET_ARCH_VARIANT := armv8-a
           TARGET_CPU_ABI := arm64-v8a
           TARGET_CPU_ABI2 :=
           TARGET_CPU_VARIANT := kryo
-
           TARGET_2ND_ARCH := arm
           TARGET_2ND_ARCH_VARIANT := armv8-a
           TARGET_2ND_CPU_ABI := armeabi-v7a
           TARGET_2ND_CPU_ABI2 := armeabi
           TARGET_2ND_CPU_VARIANT := cortex-a73
-
           # 64-bit support
           TARGET_SUPPORTS_64_BIT_APPS := true
-
           # Platform
           TARGET_BOARD_PLATFORM := kona
           TARGET_BOARD_PLATFORM_GPU := qcom-adreno650
@@ -237,7 +307,6 @@ jobs:
           PRODUCT_PLATFORM := kona
           TARGET_NO_BOOTLOADER := true
           QCOM_BOARD_PLATFORMS += kona
-
           # Kernel (prebuilt from device tree)
           BOARD_KERNEL_CMDLINE := console=ttyMSM0,115200n8 androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 video=vfb:640x400,bpp=32,memsize=3072000 msm_rtb.filter=0x237 service_locator.enable=1 androidboot.usbcontroller=a600000.dwc3 swiotlb=2048 loop.max_part=7 cgroup.memory=nokmem,nosocket
           BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive androidboot.init_fatal_reboot_target=recovery
@@ -260,44 +329,36 @@ jobs:
           BOARD_MKBOOTIMG_ARGS += --base $(BOARD_KERNEL_BASE)
           BOARD_MKBOOTIMG_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
           BOARD_MKBOOTIMG_ARGS += --ramdisk_offset $(BOARD_RAMDISK_OFFSET)
-          BOARD_MKBOOTIMG_ARGS += --tags_offset $(BOARD_KERNEL_TAGS_OFFSET)
+          BOARD_MKBOOTIMG_ARGS += --tags_offset $(BOARD_TAGS_OFFSET)
           BOARD_MKBOOTIMG_ARGS += --kernel_offset $(BOARD_KERNEL_OFFSET)
           BOARD_MKBOOTIMG_ARGS += --second_offset $(BOARD_KERNEL_SECOND_OFFSET)
           BOARD_MKBOOTIMG_ARGS += --dtb_offset $(BOARD_DTB_OFFSET)
           BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOT_HEADER_VERSION)
-
           # Assert
           TARGET_OTA_ASSERT_DEVICE := apollo,apollopro
-
           # AVB
           BOARD_AVB_ENABLE := true
           BOARD_AVB_ROLLBACK_INDEX := $(PLATFORM_SECURITY_PATCH_TIMESTAMP)
-
           # Partitions
           BOARD_FLASH_BLOCK_SIZE := 262144
           BOARD_BOOTIMAGE_PARTITION_SIZE := 134217728
           BOARD_RECOVERYIMAGE_PARTITION_SIZE := 134217728
-
           # Dynamic Partitions
           BOARD_SUPER_PARTITION_SIZE := 9126805504
           BOARD_SUPER_PARTITION_GROUPS := qti_dynamic_partitions
           BOARD_QTI_DYNAMIC_PARTITIONS_SIZE := 9126805504
           BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST := product vendor system system_ext odm
-
           # Virtual A/B
           AB_OTA_UPDATER := true
-
           # File systems
           TARGET_USERIMAGES_USE_EXT4 := true
           TARGET_USERIMAGES_USE_F2FS := true
           BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
           TARGET_COPY_OUT_VENDOR := vendor
-
           # Recovery
           BOARD_HAS_LARGE_FILESYSTEM := true
           TARGET_RECOVERY_PIXEL_FORMAT := BGRA_8888
           BOARD_USES_METADATA_PARTITION := true
-
           # Crypto / FBE Decryption
           PLATFORM_SECURITY_PATCH := 2099-12-31
           VENDOR_SECURITY_PATCH := 2099-12-31
@@ -307,7 +368,6 @@ jobs:
           TW_USE_FSCRYPT_POLICY := 2
           BOARD_USES_QCOM_FBE_DECRYPTION := true
           BOARD_USES_QCOM_DECRYPTION := true
-
           # TWRP specific build flags
           TW_THEME := portrait_hdpi
           RECOVERY_SDCARD_ON_DATA := true
@@ -335,38 +395,21 @@ jobs:
           echo ""
           echo "twrp_apollo.mk:"
           cat $DEVICE_PATH/twrp_apollo.mk
-          echo ""
-          echo "BoardConfig.mk (first 20 lines):"
-          head -20 $DEVICE_PATH/BoardConfig.mk
-          echo "..."
-          echo "BoardConfig.mk (crypto section):"
-          grep -A 5 "Crypto" $DEVICE_PATH/BoardConfig.mk || grep -A 5 "FBE" $DEVICE_PATH/BoardConfig.mk
 
       - name: Build recovery image
         run: |
+          set -e
           cd ~/android/twrp
           export ALLOW_MISSING_DEPENDENCIES=true
           export BUILD_BROKEN_DUP_RULES=true
           export BUILD_BROKEN_USES_BUILD_COPY_FILES=true
           source build/envsetup.sh
-
-          # Use bp2a release (trunk_staging is not supported in Android 16)
           lunch twrp_apollo-bp2a-eng
-
           echo "Building with TARGET_PRODUCT=$TARGET_PRODUCT"
           echo "TARGET_RELEASE=$TARGET_RELEASE"
           echo "Memory:"
           free -h
-          echo "=== Memory detail (meminfo) ==="
-          grep -E "MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree" /proc/meminfo
-          echo "=== cgroup memory.events (OOM 计数) ==="
-          cat /sys/fs/cgroup/memory.events 2>/dev/null || echo "memory.events not accessible"
 
-          # 编译改为后台运行 + 前台心跳输出：
-          # 1) 全量日志实时写入 /tmp/build_full.log；
-          # 2) 前台每 40 秒打印一次日志尾部并输出心跳，保持 runner 与宿主通信，
-          #    避免编译大输出被 tail 吞掉、宿主导致长时间静默失联被 SIGTERM；
-          # 3) 编译结束用哨兵文件准确退出循环，透传 mka 真实退出码。
           set -o pipefail
           rm -f /tmp/build_done
           (
@@ -376,43 +419,17 @@ jobs:
           BUILD_JOB=$!
           while [ ! -f /tmp/build_done ]; do
             echo "---- progress @ $(date -u +%H:%M:%S) ----"
-            tail -30 /tmp/build_full.log 2>/dev/null
-            echo "[heartbeat] build still running ..."
-            echo "[mem] $(free -m | awk '/Mem:/{printf "used=%dMB free=%dMB avail=%dMB", $3, $4, $7}') | $(free -m | awk '/Swap:/{printf "swap_used=%dMB swap_free=%dMB", $3, $4}')"
-            if [ -r /sys/fs/cgroup/memory.events ]; then
-              echo "[cgroup-events] $(tr '\n' ' ' < /sys/fs/cgroup/memory.events)"
-            fi
-            # 失败检测：出现 ninja 汇总失败标记时，若 mka 仍挂起则强制终止，
-            # 避免重演 Run21 空转近 5 小时直到 6h 超时的悲剧
-            if grep -qE "failed to build some targets|ninja failed with" /tmp/build_full.log 2>/dev/null; then
-              echo "[fail-detect] build failure marker found, waiting up to 60s for mka exit..."
-              for i in 1 2 3; do
-                [ -f /tmp/build_done ] && break
-                sleep 20
-              done
-              if [ ! -f /tmp/build_done ]; then
-                echo "[fail-detect] mka hung after failure, terminating build job"
-                kill $BUILD_JOB 2>/dev/null || true
-                pkill -P $BUILD_JOB 2>/dev/null || true
-                wait $BUILD_JOB 2>/dev/null || true
-                echo "ok" > /tmp/build_done
-              fi
-              break
-            fi
+            tail -30 /tmp/build_full.log 2>/dev/null || echo "(no log yet)"
             sleep 40
           done
           wait $BUILD_JOB
-          BUILD_STATUS=$?
-          echo "=== Build step exited with status $BUILD_STATUS ==="
-          echo "=== OOM check ==="
-          dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -20 || sudo dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -20 || echo "dmesg not accessible"
-          cat /sys/fs/cgroup/memory.events 2>/dev/null || true
-          echo "=== last 80 lines of full build log ==="
-          tail -80 /tmp/build_full.log 2>/dev/null
-          exit $BUILD_STATUS
+          BUILD_EXIT=$?
+          echo "=== Build process exited with code $BUILD_EXIT ==="
+          exit $BUILD_EXIT
 
       - name: Check build output
         run: |
+          set -e
           cd ~/android/twrp
           if [ -f out/target/product/apollo/recovery.img ]; then
             echo "=== BUILD SUCCESSFUL ==="
@@ -436,13 +453,11 @@ jobs:
           path: ~/android/twrp/out/target/product/apollo/recovery.img
           retention-days: 30
 
-      # 关键修复：日志上传改为 always()，保证无论成功/失败/进程异常退出，
-      # 只要 runner 还能执行步骤，全量编译日志一定进 artifact，便于定位真错误。
-      - name: Upload build log
-        if: always()
+      - name: Upload build log on failure
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-apollo
           path: /tmp/build_full.log
-          retention-days: 30
-          if-no-files-found: error
+          retention-days: 7
+          if-no-files-found: ignore
