@@ -100,7 +100,7 @@ jobs:
           restore-keys: |
             ccache-apollo-twrp-
 
-      - name: Configure git and proxy
+      - name: Configure git
         run: |
           set -e
           git config --global user.name "GitHub Actions"
@@ -110,58 +110,99 @@ jobs:
           git config --global http.postBuffer 524288000
           git config --global --unset http.lowSpeedLimit 2>/dev/null || true
           git config --global --unset http.lowSpeedTime 2>/dev/null || true
-          # 配置代理（Watt Toolkit on WSL2）
-          git config --global http.proxy http://172.19.144.1:26561
-          git config --global https.proxy http://172.19.144.1:26561
-          export http_proxy=http://172.19.144.1:26561
-          export https_proxy=http://172.19.144.1:26561
-          echo "=== Testing GitHub connectivity ==="
-          for i in 1 2 3 4 5; do
-            if curl -s --connect-timeout 10 -o /dev/null -w "%{http_code}" https://github.com 2>/dev/null | grep -q "200\|301"; then
-              echo "GitHub reachable on attempt $i"
-              break
-            else
-              echo "Attempt $i: GitHub not reachable, retrying in 5s..."
-              sleep 5
-            fi
-          done
+          # 先不设代理，后面按需启用
+          echo "Git configured (no proxy yet)"
 
-      - name: Initialize TWRP source (with retries)
+      - name: Initialize TWRP source (multi-mirror fallback)
         run: |
           set -e
           # Clean any leftover from previous failed attempts
-          rm -rf ~/android/twrp
+          rm -rf ~/android/twrp ~/manifests-local
           mkdir -p ~/android/twrp
           cd ~/android/twrp
 
-          # Use locally pre-cloned repo source
+          # ==========================================
+          # Helper: clone repo with multiple fallback methods
+          # ==========================================
+          try_clone() {
+            local url=$1
+            local dest=$2
+            local branch=$3
+            rm -rf $dest
+
+            # Method 1: Direct connection
+            echo "  Trying direct connection..."
+            git config --global --unset http.proxy 2>/dev/null || true
+            git config --global --unset https.proxy 2>/dev/null || true
+            unset http_proxy https_proxy
+            for i in 1 2; do
+              if git clone --depth=1 -b $branch $url $dest; then
+                echo "  Direct clone succeeded!"
+                return 0
+              fi
+              sleep 3
+            done
+
+            # Method 2: ghproxy mirrors
+            echo "  Trying ghproxy mirrors..."
+            for mirror in "https://ghproxy.com/https://github.com" "https://mirror.ghproxy.com/https://github.com"; do
+              echo "    Mirror: $mirror"
+              # Replace github.com with mirror
+              local mirror_url=$(echo $url | sed "s|https://github.com|$mirror|")
+              if git clone --depth=1 -b $branch $mirror_url $dest; then
+                echo "    Mirror clone succeeded!"
+                return 0
+              fi
+              rm -rf $dest
+              sleep 2
+            done
+
+            # Method 3: Watt Toolkit proxy
+            echo "  Trying Watt Toolkit proxy..."
+            git config --global http.proxy http://172.19.144.1:26561
+            git config --global https.proxy http://172.19.144.1:26561
+            export http_proxy=http://172.19.144.1:26561
+            export https_proxy=http://172.19.144.1:26561
+            for i in 1 2 3; do
+              if git clone --depth=1 -b $branch $url $dest; then
+                echo "  Proxy clone succeeded!"
+                return 0
+              fi
+              echo "  Proxy attempt $i failed..."
+              sleep 5
+              rm -rf $dest
+            done
+
+            return 1
+          }
+
+          # ==========================================
+          # Step 1: Clone git-repo tool itself
+          # ==========================================
+          echo "=== Cloning git-repo tool ==="
           if [ ! -d ~/repo-source/repo/.git ]; then
-            echo "Pre-cloning repo source..."
-            git clone --depth=1 https://github.com/GerritCodeReview/git-repo.git ~/repo-source/repo
+            if ! try_clone "https://github.com/GerritCodeReview/git-repo.git" ~/repo-source/repo "main"; then
+              echo "ERROR: Failed to clone git-repo tool"
+              exit 1
+            fi
           fi
           export REPO_URL='file://'"$HOME"'/repo-source/repo'
 
           # ==========================================
-          # Retry repo init up to 5 times
+          # Step 2: Clone manifest repo manually
           # ==========================================
-          echo "=== Running repo init with retries ==="
-          INIT_SUCCESS=0
-          for i in 1 2 3 4 5; do
-            echo "--- repo init attempt $i/5 ---"
-            if repo init --no-clone-bundle --depth=1 -u $MANIFEST_URL -b $MANIFEST_BRANCH; then
-              echo "repo init succeeded on attempt $i"
-              INIT_SUCCESS=1
-              break
-            else
-              echo "repo init failed on attempt $i, retrying in 10s..."
-              sleep 10
-              rm -rf .repo
-            fi
-          done
-          if [ "$INIT_SUCCESS" != "1" ]; then
-            echo "ERROR: repo init failed after 5 attempts"
+          echo "=== Cloning manifest repo ==="
+          if ! try_clone $MANIFEST_URL ~/manifests-local $MANIFEST_BRANCH; then
+            echo "ERROR: Failed to clone manifest repo via all methods"
             exit 1
           fi
+
+          # ==========================================
+          # Step 3: repo init with local manifest dir
+          # ==========================================
+          echo "=== Running repo init with local manifest ==="
+          repo init --no-clone-bundle --depth=1 --manifest-dir=~/manifests-local -b $MANIFEST_BRANCH
+          echo "repo init succeeded!"
 
           # Replace google AOSP server with Tsinghua mirror
           if [ -f .repo/manifest.xml ]; then
@@ -194,45 +235,124 @@ jobs:
             exit 1
           fi
 
-      - name: Clone device tree (with retries)
+      - name: Clone device tree (multi-mirror)
         run: |
           set -e
           cd ~/android/twrp
-          echo "=== Cloning device tree with retries ==="
-          for i in 1 2 3 4 5; do
-            echo "--- device tree clone attempt $i/5 ---"
-            if git clone --depth=1 -b $DEVICE_TREE_BRANCH $DEVICE_TREE_URL device/xiaomi/apollo; then
-              echo "Device tree clone succeeded on attempt $i"
-              break
-            else
-              echo "Device tree clone failed on attempt $i, retrying in 10s..."
-              sleep 10
-              rm -rf device/xiaomi/apollo
-            fi
-          done
-          if [ ! -d device/xiaomi/apollo ]; then
-            echo "ERROR: device tree clone failed after 5 attempts"
+
+          # 复用多镜像克隆函数
+          try_clone() {
+            local url=$1
+            local dest=$2
+            local branch=$3
+            rm -rf $dest
+
+            # Method 1: Direct
+            echo "  Trying direct connection..."
+            git config --global --unset http.proxy 2>/dev/null || true
+            git config --global --unset https.proxy 2>/dev/null || true
+            unset http_proxy https_proxy
+            for i in 1 2; do
+              if git clone --depth=1 -b $branch $url $dest; then
+                echo "  Direct clone succeeded!"
+                return 0
+              fi
+              sleep 3
+            done
+
+            # Method 2: ghproxy mirrors
+            echo "  Trying ghproxy mirrors..."
+            for mirror in "https://ghproxy.com/https://github.com" "https://mirror.ghproxy.com/https://github.com"; do
+              local mirror_url=$(echo $url | sed "s|https://github.com|$mirror|")
+              if git clone --depth=1 -b $branch $mirror_url $dest; then
+                echo "  Mirror clone succeeded!"
+                return 0
+              fi
+              rm -rf $dest
+              sleep 2
+            done
+
+            # Method 3: Watt Toolkit proxy
+            echo "  Trying Watt Toolkit proxy..."
+            git config --global http.proxy http://172.19.144.1:26561
+            git config --global https.proxy http://172.19.144.1:26561
+            export http_proxy=http://172.19.144.1:26561
+            export https_proxy=http://172.19.144.1:26561
+            for i in 1 2 3; do
+              if git clone --depth=1 -b $branch $url $dest; then
+                echo "  Proxy clone succeeded!"
+                return 0
+              fi
+              sleep 5
+              rm -rf $dest
+            done
+
+            return 1
+          }
+
+          echo "=== Cloning device tree ==="
+          if ! try_clone $DEVICE_TREE_URL device/xiaomi/apollo $DEVICE_TREE_BRANCH; then
+            echo "ERROR: device tree clone failed"
             exit 1
           fi
 
-      - name: Clone TWRP Qualcomm common (with retries)
+      - name: Clone TWRP Qualcomm common (multi-mirror)
         run: |
           set -e
           cd ~/android/twrp
-          echo "=== Cloning twrp-common with retries ==="
-          for i in 1 2 3 4 5; do
-            echo "--- twrp-common clone attempt $i/5 ---"
-            if git clone --depth=1 -b android-11 https://github.com/TeamWin/android_device_qcom_twrp-common.git device/qcom/twrp-common; then
-              echo "twrp-common clone succeeded on attempt $i"
-              break
-            else
-              echo "twrp-common clone failed on attempt $i, retrying in 10s..."
-              sleep 10
-              rm -rf device/qcom/twrp-common
-            fi
-          done
-          if [ ! -d device/qcom/twrp-common ]; then
-            echo "ERROR: twrp-common clone failed after 5 attempts"
+
+          try_clone() {
+            local url=$1
+            local dest=$2
+            local branch=$3
+            rm -rf $dest
+
+            # Method 1: Direct
+            echo "  Trying direct connection..."
+            git config --global --unset http.proxy 2>/dev/null || true
+            git config --global --unset https.proxy 2>/dev/null || true
+            unset http_proxy https_proxy
+            for i in 1 2; do
+              if git clone --depth=1 -b $branch $url $dest; then
+                echo "  Direct clone succeeded!"
+                return 0
+              fi
+              sleep 3
+            done
+
+            # Method 2: ghproxy mirrors
+            echo "  Trying ghproxy mirrors..."
+            for mirror in "https://ghproxy.com/https://github.com" "https://mirror.ghproxy.com/https://github.com"; do
+              local mirror_url=$(echo $url | sed "s|https://github.com|$mirror|")
+              if git clone --depth=1 -b $branch $mirror_url $dest; then
+                echo "  Mirror clone succeeded!"
+                return 0
+              fi
+              rm -rf $dest
+              sleep 2
+            done
+
+            # Method 3: Watt Toolkit proxy
+            echo "  Trying Watt Toolkit proxy..."
+            git config --global http.proxy http://172.19.144.1:26561
+            git config --global https.proxy http://172.19.144.1:26561
+            export http_proxy=http://172.19.144.1:26561
+            export https_proxy=http://172.19.144.1:26561
+            for i in 1 2 3; do
+              if git clone --depth=1 -b $branch $url $dest; then
+                echo "  Proxy clone succeeded!"
+                return 0
+              fi
+              sleep 5
+              rm -rf $dest
+            done
+
+            return 1
+          }
+
+          echo "=== Cloning twrp-common ==="
+          if ! try_clone "https://github.com/TeamWin/android_device_qcom_twrp-common.git" device/qcom/twrp-common "android-11"; then
+            echo "ERROR: twrp-common clone failed"
             exit 1
           fi
           touch device/qcom/twrp-common/twrp-common.mk
