@@ -129,14 +129,20 @@ jobs:
           # Verify rewrite happened
           echo '=== manifest fetch URL after rewrite ==='
           grep -h 'fetch=' .repo/manifest.xml .repo/manifests/default.xml 2>/dev/null | head -5 || true
-          # Configure git for slow/mirrored networks:
+          # Configure git for slow/mirrored networks + route through Watt Toolkit proxy:
           # - HTTP/1.1 avoids HTTP/2 framing errors with some proxies
           # - large postBuffer for big repos (some AOSP submodules are >1GB)
           # - REMOVE lowSpeedLimit (was set wrongly before; AOSP mirrors are slow by nature)
+          # - Force proxy: direct connections to github.com fail with GnuTLS recv errors (-54/-110);
+          #   route all git+curl traffic through the host's Watt Toolkit (port 26561 exposed on WSL2 as 172.19.144.1:26561).
           git config --global http.version HTTP/1.1
           git config --global http.postBuffer 524288000
           git config --global --unset http.lowSpeedLimit 2>/dev/null || true
           git config --global --unset http.lowSpeedTime 2>/dev/null || true
+          git config --global http.proxy http://172.19.144.1:26561
+          git config --global https.proxy http://172.19.144.1:26561
+          export http_proxy=http://172.19.144.1:26561
+          export https_proxy=http://172.19.144.1:26561
           # Sync with moderate concurrency and retry transient network failures
           repo sync -c --no-tags --no-clone-bundle -j4 --retry-fetches=5
 
